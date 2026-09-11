@@ -268,20 +268,8 @@
         <span id="peer-status-dot" class="inline-block w-2 h-2 rounded-full bg-yellow-400 flex-shrink-0"></span>
         <span id="peer-status-text" class="text-[10px] text-wa-muted font-mono truncate">Peer Status: Connecting</span>
       </div>
-    </div>
-
-    <!-- (Test Override removed) -->
-
-    <!-- Header action icons -->
-    <div class="flex items-center gap-0.5">
-      <button class="w-9 h-9 rounded-full flex items-center justify-center text-[#aebac1] hover:bg-wa-border">
-        <svg width="20" height="20" fill="currentColor" viewBox="0 0 24 24"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>
-      </button>
-      <button class="w-9 h-9 rounded-full flex items-center justify-center text-[#aebac1] hover:bg-wa-border">
-        <svg width="20" height="20" fill="currentColor" viewBox="0 0 24 24"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
-      </button>
-    </div>
   </div>
+
 
   <!-- Disconnect overlay -->
   <div id="disconnected-overlay" class="hidden absolute inset-0 z-[200] bg-black/70 backdrop-blur-sm flex flex-col items-center justify-center gap-4">
@@ -537,7 +525,7 @@ function setupConn() {
     conn.send(JSON.stringify({ type: 'hello', name: myName }));
   });
 
-  // Unified data handler — handles ALL message types from the start
+  // Unified data handler — handles ALL message types
   conn.on('data', raw => {
     try {
       if (typeof raw === 'string') {
@@ -546,16 +534,17 @@ function setupConn() {
           peerName = msg.name;
           enterChat();
         } else if (msg.type === 'clip-start') {
-          incomingMeta   = msg;
-          incomingChunks = [];
-          console.log('[Recv] clip-start, mime:', msg.mime, 'size:', msg.size);
+          incomingMeta   = { mime: msg.mime, total: msg.total };
+          incomingChunks = {}; // keyed by index for safe ordering
+          console.log('[Recv] clip-start, total chunks:', msg.total);
+        } else if (msg.type === 'clip-chunk') {
+          incomingChunks[msg.idx] = msg.data;
         } else if (msg.type === 'clip-end') {
-          console.log('[Recv] clip-end, chunks:', incomingChunks.length);
+          console.log('[Recv] clip-end, assembling...');
           assembleAndRenderClip();
         }
-      } else {
-        handleIncomingChunk(raw);
       }
+      // No binary handler needed — all data is JSON strings now
     } catch(e) { console.error('[data parse]', e); }
   });
 
@@ -810,48 +799,56 @@ function setShutterRecording(on) {
 
 /* ─────────────────────────────────────────────
    SEND CLIP OVER WEBRTC
-   Strategy: chunk the Blob into 64 KB ArrayBuffers
-   because PeerJS DataChannel has a practical limit
-   per send call (~16 KB – 256 KB depending on browser).
+   Strategy: convert blob → base64 string, send
+   as pure JSON chunks (8 KB each). This avoids
+   all binary DataChannel race conditions and
+   works reliably on every browser.
 ───────────────────────────────────────────── */
-const CHUNK_SIZE = 64 * 1024; // 64 KB
+const B64_CHUNK = 8000; // ~8 KB of base64 per message
+
+function blobToDataURL(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload  = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
 
 async function dispatchClip(blob) {
-  // Show outgoing bubble immediately
+  // Show outgoing bubble immediately (local preview)
   addActionBubble('out', URL.createObjectURL(blob));
   playSent();
 
-  // Guard: don't try to send if channel isn't open
   if (!conn || !conn.open) {
     showConnBanner('Not connected — check your connection.');
-    console.warn('[dispatchClip] conn not open — clip shown locally only');
+    console.warn('[dispatchClip] conn not open');
     return;
   }
 
   try {
-    // Send metadata first
-    conn.send(JSON.stringify({ type: 'clip-start', size: blob.size, mime: blob.type }));
-    console.log('[Send] clip-start sent, size:', blob.size, 'mime:', blob.type);
+    // Convert blob → base64 data URL, strip the prefix
+    const dataURL = await blobToDataURL(blob);
+    const base64  = dataURL.split(',')[1];
+    const total   = Math.ceil(base64.length / B64_CHUNK);
 
-    // Send binary chunks
-    const buf = await blob.arrayBuffer();
-    let offset = 0;
-    let chunkCount = 0;
-    while (offset < buf.byteLength) {
-      const end   = Math.min(offset + CHUNK_SIZE, buf.byteLength);
-      const chunk = buf.slice(offset, end);
-      conn.send(chunk);
-      offset = end;
-      chunkCount++;
-      await sleep(20); // yield between chunks to keep channel healthy
+    console.log(`[Send] ${blob.size}B → base64 ${base64.length} chars → ${total} chunks`);
+
+    // 1. Signal start
+    conn.send(JSON.stringify({ type: 'clip-start', mime: blob.type, total }));
+
+    // 2. Send indexed base64 chunks
+    for (let i = 0; i < total; i++) {
+      const data = base64.slice(i * B64_CHUNK, (i + 1) * B64_CHUNK);
+      conn.send(JSON.stringify({ type: 'clip-chunk', idx: i, data }));
+      await sleep(15); // small yield so channel stays healthy
     }
-    console.log('[Send] sent', chunkCount, 'chunks');
 
-    // Signal end
+    // 3. Signal end
     conn.send(JSON.stringify({ type: 'clip-end' }));
-    console.log('[Send] clip-end sent');
+    console.log('[Send] all done');
   } catch(e) {
-    console.error('[dispatchClip] send error:', e);
+    console.error('[dispatchClip] error:', e);
     showConnBanner('Failed to send clip — connection may be unstable.');
   }
 }
@@ -859,41 +856,40 @@ async function dispatchClip(blob) {
 /* ─────────────────────────────────────────────
    INCOMING CLIP REASSEMBLY
 ───────────────────────────────────────────── */
-let incomingMeta    = null;
-let incomingChunks  = [];
-
-function handleIncomingChunk(raw) {
-  if (raw instanceof ArrayBuffer) {
-    incomingChunks.push(raw);
-    return;
-  }
-  if (raw instanceof Blob) {
-    raw.arrayBuffer().then(ab => incomingChunks.push(ab));
-    return;
-  }
-}
-
-// hookClipSignals is no longer needed — setupConn handles all message
-// types (hello, clip-start, clip-end, binary chunks) from the start.
-// Kept as a no-op for safety in case it's called anywhere.
-function hookClipSignals() {
-  console.log('[hookClipSignals] no-op — unified handler already active');
-}
+let incomingMeta   = null;
+let incomingChunks = {};
 
 function assembleAndRenderClip() {
-  if (!incomingChunks.length) {
-    console.warn('[assemble] no chunks received');
-    return;
+  const total = incomingMeta?.total || 0;
+  const mime  = incomingMeta?.mime  || 'video/webm';
+
+  // Reassemble base64 string in index order
+  let base64 = '';
+  for (let i = 0; i < total; i++) {
+    if (incomingChunks[i] === undefined) {
+      console.warn('[assemble] missing chunk', i);
+    }
+    base64 += incomingChunks[i] || '';
   }
-  const mime = incomingMeta?.mime || 'video/webm';
-  const blob = new Blob(incomingChunks, { type: mime });
-  console.log('[assemble] clip assembled:', blob.size, 'B  mime:', mime);
-  incomingChunks = [];
+
+  incomingChunks = {};
   incomingMeta   = null;
 
-  const url = URL.createObjectURL(blob);
-  addActionBubble('in', url);
-  playChime();
+  if (!base64) { console.warn('[assemble] empty base64'); return; }
+
+  // Decode base64 → Uint8Array → Blob → object URL
+  try {
+    const binary = atob(base64);
+    const bytes  = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const blob = new Blob([bytes], { type: mime });
+    console.log('[assemble] clip ready:', blob.size, 'B  mime:', mime);
+    const url = URL.createObjectURL(blob);
+    addActionBubble('in', url);
+    playChime();
+  } catch(e) {
+    console.error('[assemble] decode error:', e);
+  }
 }
 
 /* ─────────────────────────────────────────────
