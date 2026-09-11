@@ -417,6 +417,25 @@ let peerName = '';
 let myPeer   = null;
 let conn     = null;
 let camStream      = null;
+
+/* Shared ICE config — STUN + TURN relays for mobile data / symmetric NAT */
+const ICE_CONFIG = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    // Free Open Relay TURN servers (no sign-up needed)
+    {
+      urls: [
+        'turn:openrelay.metered.ca:80',
+        'turn:openrelay.metered.ca:443',
+        'turn:openrelay.metered.ca:443?transport=tcp',
+      ],
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+  ],
+  iceTransportPolicy: 'all',
+};
 let mediaRecorder  = null;
 let recordedChunks = [];
 let recordTimer    = null;
@@ -462,16 +481,7 @@ function generateRoom() {
 
   document.getElementById('host-waiting').classList.remove('hidden');
 
-  myPeer = new Peer(pid, {
-    debug: 0,
-    config: {
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' },
-      ],
-    },
-  });
+  myPeer = new Peer(pid, { debug: 0, config: ICE_CONFIG });
   myPeer.on('open',       ()  => console.log('[Peer] host ready:', pid));
   myPeer.on('connection', c   => { conn = c; setPeerStatus('connecting'); setupConn(); });
   myPeer.on('error',      err => { console.error('[Peer] host error:', err); setPeerStatus('disconnected'); });
@@ -490,16 +500,7 @@ function joinRoom() {
   showJoinStatus('Connecting…', 'text-wa-green animate-blink');
   document.getElementById('connecting-overlay').classList.replace('hidden','flex');
 
-  myPeer = new Peer(undefined, {
-    debug: 0,
-    config: {
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' },
-      ],
-    },
-  });
+  myPeer = new Peer(undefined, { debug: 0, config: ICE_CONFIG });
   myPeer.on('open', () => {
     conn = myPeer.connect('karmatext-' + code, { reliable: true });
     setPeerStatus('connecting');
