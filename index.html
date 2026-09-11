@@ -270,38 +270,7 @@
       </div>
     </div>
 
-    <!-- 🧪 Test Override -->
-    <div class="relative flex-shrink-0">
-      <button id="test-btn" onclick="toggleTestMenu()"
-        class="flex items-center gap-1 bg-wa-border hover:bg-[#374045] text-wa-muted text-[11px] font-bold px-2.5 py-1.5 rounded-lg border border-[#374045] transition-colors">
-        🧪 Test
-        <svg width="10" height="10" fill="currentColor" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z"/></svg>
-      </button>
-
-      <div id="test-menu" class="menu-hidden absolute right-0 top-10 w-56 bg-[#1a2730] border border-wa-border rounded-2xl shadow-2xl z-[9999] overflow-hidden">
-        <div class="px-4 py-2.5 border-b border-wa-border">
-          <p class="text-wa-green text-[11px] font-bold uppercase tracking-wider">Test Override</p>
-          <p class="text-wa-muted text-[10px] mt-0.5">Send a clip instantly (demo fallback)</p>
-        </div>
-        <div class="py-1">
-          <button onclick="testOverride('coffee')"  class="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-wa-border text-left transition-colors">
-            <span>☕</span><span class="text-wa-text text-sm">Let's grab coffee</span>
-          </button>
-          <button onclick="testOverride('running')" class="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-wa-border text-left transition-colors">
-            <span>🏃‍♂️</span><span class="text-wa-text text-sm">On my way</span>
-          </button>
-          <button onclick="testOverride('shush')"   class="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-wa-border text-left transition-colors">
-            <span>🤫</span><span class="text-wa-text text-sm">Shhh / Keep quiet</span>
-          </button>
-          <button onclick="testOverride('no')"      class="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-wa-border text-left transition-colors">
-            <span>❌</span><span class="text-wa-text text-sm">Absolutely not</span>
-          </button>
-          <button onclick="testOverride('sleep')"   class="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-wa-border text-left transition-colors">
-            <span>😴</span><span class="text-wa-text text-sm">Going to sleep</span>
-          </button>
-        </div>
-      </div>
-    </div>
+    <!-- (Test Override removed) -->
 
     <!-- Header action icons -->
     <div class="flex items-center gap-0.5">
@@ -766,116 +735,23 @@ function stopRecord() {
 
 function finaliseClip() {
   const mime = mediaRecorder?.mimeType || 'video/webm';
-  const rawBlob = new Blob(recordedChunks, { type: mime });
+  const blob = new Blob(recordedChunks, { type: mime });
   recordedChunks = [];
 
   collapseViewfinder();
   setShutterRecording(false);
   resetRing();
 
-  if (rawBlob.size < 1000) {
+  if (blob.size < 1000) {
     console.warn('[Record] clip too small, discarding');
     return;
   }
 
-  // ── Downscale: draw each frame of the recorded clip onto a 320×240
-  //    canvas and re-encode as a JPEG-based WebP/JPEG data-URL sequence,
-  //    then pack into a tiny video-shaped Blob.
-  //    Strategy: seek a temporary <video> through the clip, snapshot
-  //    4 evenly-spaced frames at 320×240 / JPEG 0.6, bundle as a
-  //    multi-frame WebP blob if supported, else fall back to raw blob.
-  //    This keeps the DataChannel payload well under 50 KB.
-  downscaleClip(rawBlob).then(finalBlob => {
-    console.log(`[Record] raw=${rawBlob.size}B  final=${finalBlob.size}B`);
-    dispatchClip(finalBlob);
-  });
+  console.log(`[Record] clip ready: ${blob.size}B  mime: ${mime}`);
+  dispatchClip(blob);
 }
 
-/**
- * Draws 4 evenly-spaced frames of `blob` onto a 320×240 canvas,
- * encodes each as JPEG (quality 0.6), and packages them into a
- * single Blob that the peer can display as a looping <video> or
- * <img> sequence.  Falls back to the original blob on any error.
- */
-function downscaleClip(blob) {
-  return new Promise(resolve => {
-    const W = 320, H = 240, Q = 0.6, FRAMES = 4;
 
-    const vid = document.createElement('video');
-    vid.muted    = true;
-    vid.preload  = 'auto';
-    vid.playsInline = true;
-    const url    = URL.createObjectURL(blob);
-    vid.src      = url;
-
-    const canvas = document.createElement('canvas');
-    canvas.width  = W;
-    canvas.height = H;
-    const ctx    = canvas.getContext('2d');
-
-    const frameDataURLs = [];
-
-    vid.addEventListener('loadedmetadata', () => {
-      const duration = isFinite(vid.duration) && vid.duration > 0 ? vid.duration : 2;
-      let frameIdx   = 0;
-
-      function onSeeked() {
-        ctx.drawImage(vid, 0, 0, W, H);
-        frameDataURLs.push(canvas.toDataURL('image/jpeg', Q));
-        frameIdx++;
-        if (frameIdx >= FRAMES) {
-          vid.removeEventListener('seeked', onSeeked);
-          URL.revokeObjectURL(url);
-          packageFrames(frameDataURLs, blob, resolve);
-        } else {
-          const t = (frameIdx / (FRAMES - 1)) * Math.max(duration - 0.05, 0);
-          vid.currentTime = t;
-        }
-      }
-
-      // Register seeked handler once — it re-triggers itself for each frame
-      vid.addEventListener('seeked', onSeeked);
-
-      // Kick off first seek
-      const t0 = 0;
-      vid.currentTime = t0;
-    });
-
-    vid.addEventListener('error', () => {
-      URL.revokeObjectURL(url);
-      console.warn('[downscale] video load error, using raw blob');
-      resolve(blob);
-    });
-
-    vid.load();
-  });
-}
-
-/**
- * If VideoEncoder (WebCodecs) is unavailable — which it is in most
- * mobile browsers today — we fall back to sending the 4 JPEG frames
- * as a JSON-wrapped payload.  The receiver renders the first frame
- * as a still image and loops through all 4 with a CSS animation.
- * Total payload: 4 × ~8 KB ≈ 32 KB, well under the 50 KB target.
- */
-function packageFrames(dataURLs, fallbackBlob, resolve) {
-  // Strip the data:image/jpeg;base64, prefix to get raw base64
-  const stripped = dataURLs.map(d => d.split(',')[1]);
-  const totalB64Bytes = stripped.reduce((s, b) => s + b.length * 0.75, 0);
-  console.log(`[downscale] ${stripped.length} frames, ~${Math.round(totalB64Bytes / 1024)} KB total`);
-
-  if (totalB64Bytes > 200 * 1024) {
-    // Safety: if somehow still too big, fall back to raw
-    console.warn('[downscale] frames too large, using raw blob');
-    resolve(fallbackBlob);
-    return;
-  }
-
-  // Encode as a JSON blob tagged with a custom mime type so the
-  // receiver knows to treat it as a frame-burst rather than video.
-  const payload = JSON.stringify({ type: 'frameburst', frames: stripped });
-  resolve(new Blob([payload], { type: 'application/x-frameburst' }));
-}
 
 /* ─────────────────────────────────────────────
    RING ANIMATION
@@ -941,42 +817,43 @@ function setShutterRecording(on) {
 const CHUNK_SIZE = 64 * 1024; // 64 KB
 
 async function dispatchClip(blob) {
-  // Render outgoing bubble immediately — frame-burst or raw video
-  if (blob.type === 'application/x-frameburst') {
-    blob.text().then(text => {
-      try {
-        const payload = JSON.parse(text);
-        addActionBubble('out', null, payload.frames);
-      } catch(e) { console.error('[dispatchClip] frameburst parse', e); }
-    });
-  } else {
-    addActionBubble('out', URL.createObjectURL(blob), null);
-  }
+  // Show outgoing bubble immediately
+  addActionBubble('out', URL.createObjectURL(blob));
   playSent();
 
   // Guard: don't try to send if channel isn't open
   if (!conn || !conn.open) {
-    showConnBanner('Connecting to peer… please wait. Clip saved locally.');
+    showConnBanner('Not connected — check your connection.');
     console.warn('[dispatchClip] conn not open — clip shown locally only');
     return;
   }
 
-  // Send metadata first
-  conn.send(JSON.stringify({ type: 'clip-start', size: blob.size, mime: blob.type }));
+  try {
+    // Send metadata first
+    conn.send(JSON.stringify({ type: 'clip-start', size: blob.size, mime: blob.type }));
+    console.log('[Send] clip-start sent, size:', blob.size, 'mime:', blob.type);
 
-  // Send binary chunks
-  const buf = await blob.arrayBuffer();
-  let offset = 0;
-  while (offset < buf.byteLength) {
-    const end   = Math.min(offset + CHUNK_SIZE, buf.byteLength);
-    const chunk = buf.slice(offset, end);
-    conn.send(chunk);
-    offset = end;
-    await sleep(10); // small yield to avoid saturating the channel
+    // Send binary chunks
+    const buf = await blob.arrayBuffer();
+    let offset = 0;
+    let chunkCount = 0;
+    while (offset < buf.byteLength) {
+      const end   = Math.min(offset + CHUNK_SIZE, buf.byteLength);
+      const chunk = buf.slice(offset, end);
+      conn.send(chunk);
+      offset = end;
+      chunkCount++;
+      await sleep(20); // yield between chunks to keep channel healthy
+    }
+    console.log('[Send] sent', chunkCount, 'chunks');
+
+    // Signal end
+    conn.send(JSON.stringify({ type: 'clip-end' }));
+    console.log('[Send] clip-end sent');
+  } catch(e) {
+    console.error('[dispatchClip] send error:', e);
+    showConnBanner('Failed to send clip — connection may be unstable.');
   }
-
-  // Signal end
-  conn.send(JSON.stringify({ type: 'clip-end' }));
 }
 
 /* ─────────────────────────────────────────────
@@ -986,12 +863,10 @@ let incomingMeta    = null;
 let incomingChunks  = [];
 
 function handleIncomingChunk(raw) {
-  // If it looks like JSON, might be clip-start / clip-end
   if (raw instanceof ArrayBuffer) {
     incomingChunks.push(raw);
     return;
   }
-  // Blob (some browsers)
   if (raw instanceof Blob) {
     raw.arrayBuffer().then(ab => incomingChunks.push(ab));
     return;
@@ -1006,26 +881,18 @@ function hookClipSignals() {
 }
 
 function assembleAndRenderClip() {
-  if (!incomingChunks.length) return;
+  if (!incomingChunks.length) {
+    console.warn('[assemble] no chunks received');
+    return;
+  }
   const mime = incomingMeta?.mime || 'video/webm';
   const blob = new Blob(incomingChunks, { type: mime });
+  console.log('[assemble] clip assembled:', blob.size, 'B  mime:', mime);
   incomingChunks = [];
   incomingMeta   = null;
 
-  if (mime === 'application/x-frameburst') {
-    // Decode frame-burst JSON → animated bubble
-    blob.text().then(text => {
-      try {
-        const payload = JSON.parse(text);
-        addActionBubble('in', null, payload.frames);
-      } catch(e) {
-        console.error('[assemble] frameburst parse error', e);
-      }
-    });
-  } else {
-    const url = URL.createObjectURL(blob);
-    addActionBubble('in', url, null);
-  }
+  const url = URL.createObjectURL(blob);
+  addActionBubble('in', url);
   playChime();
 }
 
@@ -1037,46 +904,21 @@ const TICK_SVG = `<svg width="16" height="11" fill="#53bdeb" viewBox="0 0 16 11"
   <path d="M13.621.654l-6.384 7.738-.803-.803-.93.93 1.733 1.732 7.313-8.668-.929-.929z"/>
 </svg>`;
 
-function addActionBubble(dir, videoUrl, frames = null) {
+function addActionBubble(dir, videoUrl) {
   const msgs  = document.getElementById('messages');
   const isOut = dir === 'out';
   const bg    = isOut ? 'bg-[#005c4b]' : 'bg-[#202c33]';
   const tail  = isOut ? 'bubble-out' : 'bubble-in';
   const time  = getNow();
 
-  // Build media content: looping video OR frame-burst img sequence
-  let mediaHtml;
-  if (frames && frames.length) {
-    // Frame-burst: render first frame as <img>, add CSS keyframe loop
-    const uid = 'fb_' + Date.now();
-    const styleFrames = frames.map((f, i) => {
-      const pctStart = Math.round((i / frames.length) * 100);
-      const pctEnd   = Math.round(((i + 1) / frames.length) * 100) - 1;
-      return `${pctStart}%,${pctEnd}% { content: url("data:image/jpeg;base64,${f}"); }`;
-    }).join('\n      ');
-    mediaHtml = `
-      <style>
-        @keyframes fb_${uid} {
-          ${styleFrames}
-          100% { content: url("data:image/jpeg;base64,${frames[0]}"); }
-        }
-        #${uid} { animation: fb_${uid} 1.6s steps(1) infinite; width:100%; border-radius:6px; display:block; }
-      </style>
-      <img id="${uid}" src="data:image/jpeg;base64,${frames[0]}"
-           style="max-height:200px; object-fit:cover; background:#000;" />`;
-  } else {
-    mediaHtml = `
-      <video class="action-clip rounded"
-        src="${videoUrl}" autoplay loop muted playsinline
-        style="max-height:200px; width:100%; object-fit:cover; border-radius:6px; background:#000;">
-      </video>`;
-  }
-
   const row = document.createElement('div');
   row.className = `flex ${isOut ? 'justify-end' : 'justify-start'} animate-pop-in`;
   row.innerHTML = `
     <div class="relative ${bg} ${tail} p-1.5 pb-1 shadow-md" style="max-width:260px; min-width:160px;">
-      ${mediaHtml}
+      <video class="action-clip rounded"
+        src="${videoUrl}" autoplay loop muted playsinline
+        style="max-height:200px; width:100%; object-fit:cover; border-radius:6px; background:#000;">
+      </video>
       <div class="mt-1 px-1 flex items-center gap-1">
         <span class="text-[10px] font-bold bg-[#00a884]/20 text-[#00a884] border border-[#00a884]/30 px-2 py-0.5 rounded-full">⚡ Pure Action Verified (0% Words)</span>
       </div>
@@ -1088,36 +930,9 @@ function addActionBubble(dir, videoUrl, frames = null) {
 
   msgs.appendChild(row);
   msgs.scrollTop = msgs.scrollHeight;
-
-  // Also handle outgoing frame-burst (local preview)
-  if (isOut && !frames && !videoUrl) return;
 }
 
-/* ─────────────────────────────────────────────
-   TEST OVERRIDE — capture a real 2-second clip
-   (works the same as holding the button)
-───────────────────────────────────────────── */
-function toggleTestMenu() {
-  const m = document.getElementById('test-menu');
-  const open = m.classList.contains('menu-visible');
-  m.classList.toggle('menu-hidden',  open);
-  m.classList.toggle('menu-visible', !open);
-}
 
-document.addEventListener('click', e => {
-  const btn  = document.getElementById('test-btn');
-  const menu = document.getElementById('test-menu');
-  if (!btn.contains(e.target) && !menu.contains(e.target)) {
-    menu.classList.replace('menu-visible', 'menu-hidden');
-  }
-});
-
-function testOverride(label) {
-  document.getElementById('test-menu').classList.replace('menu-visible', 'menu-hidden');
-  // Trigger a real 2-second recording — same as pressing the button
-  startRecord();
-  setTimeout(stopRecord, RECORD_MS);
-}
 
 /* ─────────────────────────────────────────────
    UTILS
